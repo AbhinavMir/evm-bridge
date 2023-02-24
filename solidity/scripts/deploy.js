@@ -1,31 +1,56 @@
-// We require the Hardhat Runtime Environment explicitly here. This is optional
-// but useful for running the script in a standalone fashion through `node <script>`.
-//
-// You can also run a script with `npx hardhat run <script>`. If you do that, Hardhat
-// will compile your contracts, add the Hardhat Runtime Environment's members to the
-// global scope, and execute the script.
-const hre = require("hardhat");
+const Web3 = require('web3');
+const bridgeAbi = require('./bridge.abi.json');
 
-async function main() {
-  const currentTimestampInSeconds = Math.round(Date.now() / 1000);
-  const ONE_YEAR_IN_SECS = 365 * 24 * 60 * 60;
-  const unlockTime = currentTimestampInSeconds + ONE_YEAR_IN_SECS;
+const web3C = new Web3(new Web3.providers.HttpProvider('http://localhost:8545')); // Web3 provider for Chain C
+const web3X = new Web3(new Web3.providers.HttpProvider('http://localhost:8546')); // Web3 provider for Chain X
 
-  const lockedAmount = hre.ethers.utils.parseEther("1");
+const bridgeContract = new web3C.eth.Contract(bridgeAbi); // Create a new instance of the bridge contract
+const targetContractAddress = '0x1234567890123456789012345678901234567890'; // Address of target contract on Chain C
+const bridgeOwnerAddress = '0x1234567890123456789012345678901234567891'; // Address of the owner of the bridge contract
 
-  const Lock = await hre.ethers.getContractFactory("Lock");
-  const lock = await Lock.deploy(unlockTime, { value: lockedAmount });
+// Deploy the bridge contract on Chain C
+bridgeContract.deploy({
+    data: '0x1234567890', // Compiled bytecode of the bridge contract
+    arguments: [targetContractAddress]
+})
+.send({
+    from: bridgeOwnerAddress,
+    gas: 5000000
+})
+.then((newContractInstance) => {
+    console.log('Bridge contract deployed at address:', newContractInstance.options.address);
 
-  await lock.deployed();
+    // Set the address of the deployed contract in the bridge contract instance
+    bridgeContract.options.address = newContractInstance.options.address;
 
-  console.log(
-    `Lock with 1 ETH and unlock timestamp ${unlockTime} deployed to ${lock.address}`
-  );
-}
+    // Add a cross-chain transfer listener for Chain X
+    bridgeContract.events.CrossChainTransfer({
+        filter: {fromChain: web3C.utils.toChecksumAddress(newContractInstance.options.address), toChain: web3X.utils.toChecksumAddress('0xCHAIINX')},
+        fromBlock: 0
+    }, (error, event) => {
+        if (error) {
+            console.error(error);
+            return;
+        }
 
-// We recommend this pattern to be able to use async/await everywhere
-// and properly handle errors.
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
+        console.log('Received cross-chain transfer event:', event);
+
+        // Invoke the oracle on Chain X to confirm the transaction and transfer tokens to the recipient
+        web3X.eth.sendTransaction({
+            from: bridgeOwnerAddress,
+            to: '0x1234567890123456789012345678901234567892', // Address of the oracle on Chain X
+            value: 0,
+            gas: 5000000,
+            data: bridgeContract.methods.receiveFromChainC(event.returnValues.toAddress, event.returnValues.amount, web3C.utils.keccak256(event.raw)).encodeABI()
+        })
+        .then((receipt) => {
+            console.log('Sent transaction to Chain X to confirm cross-chain transfer:', receipt);
+        })
+        .catch((error) => {
+            console.error(error);
+        });
+    });
+})
+.catch((error) => {
+    console.error(error);
 });
